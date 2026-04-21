@@ -44,6 +44,54 @@ func httpError(w http.ResponseWriter, err error) {
 	}
 }
 
+// httpUserError logs an error and sends a styled HTML error page.
+// Use this for browser-facing error paths (OIDC, registration confirm)
+// where the user should see a branded page instead of plain text.
+// Technical details go to the server log; the HTML page only shows
+// an actionable message derived from the HTTP status code.
+func httpUserError(w http.ResponseWriter, err error) {
+	code := http.StatusInternalServerError
+
+	if herr, ok := errors.AsType[HTTPError](err); ok {
+		if herr.Code != 0 {
+			code = herr.Code
+		}
+
+		log.Error().Err(herr.Err).Int("code", code).Msgf("user msg: %s", herr.Msg)
+	} else {
+		log.Error().Err(err).Int("code", code).Msg("http internal server error")
+	}
+
+	userMsg := userMessageForStatusCode(code)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(code)
+
+	page := templates.AuthError(templates.AuthErrorResult{
+		Title:   "Headscale - Error",
+		Heading: http.StatusText(code),
+		Message: userMsg,
+	})
+
+	_, werr := w.Write([]byte(page.Render()))
+	if werr != nil {
+		log.Error().Err(werr).Msg("failed to write HTML error response")
+	}
+}
+
+func userMessageForStatusCode(code int) string {
+	switch {
+	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+		return "You are not authorized. Please contact your administrator."
+	case code == http.StatusGone:
+		return "Your session has expired. Please try again."
+	case code >= 400 && code < 500:
+		return "The request could not be processed. Please try again."
+	default:
+		return "Something went wrong. Please try again later."
+	}
+}
+
 // HTTPError represents an error that is surfaced to the user via web.
 type HTTPError struct {
 	Code int    // HTTP response code to send to client; 0 means 500
@@ -80,13 +128,19 @@ func parseCapabilityVersion(req *http.Request) (tailcfg.CapabilityVersion, error
 	return tailcfg.CapabilityVersion(clientCapabilityVersion), nil
 }
 
+// verifyBodyLimit caps the request body for /verify. The DERP verify
+// protocol payload (tailcfg.DERPAdmitClientRequest) is a few hundred
+// bytes; 4 KiB is generous and prevents an unauthenticated client from
+// OOMing the public router with arbitrarily large POSTs.
+const verifyBodyLimit int64 = 4 * 1024
+
 func (h *Headscale) handleVerifyRequest(
 	req *http.Request,
 	writer io.Writer,
 ) error {
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		return fmt.Errorf("reading request body: %w", err)
+		return NewHTTPError(http.StatusRequestEntityTooLarge, "request body too large", fmt.Errorf("reading request body: %w", err))
 	}
 
 	var derpAdmitClientRequest tailcfg.DERPAdmitClientRequest
@@ -123,6 +177,8 @@ func (h *Headscale) VerifyHandler(
 		httpError(writer, errMethodNotAllowed)
 		return
 	}
+
+	req.Body = http.MaxBytesReader(writer, req.Body, verifyBodyLimit)
 
 	err := h.handleVerifyRequest(req, writer)
 	if err != nil {
@@ -284,18 +340,18 @@ func (a *AuthProviderWeb) AuthHandler(
 func authIDFromRequest(req *http.Request) (types.AuthID, error) {
 	raw, err := urlParam[string](req, "auth_id")
 	if err != nil {
-		return "", NewHTTPError(http.StatusBadRequest, "invalid registration id", fmt.Errorf("parsing auth_id from URL: %w", err))
+		return "", NewHTTPError(http.StatusBadRequest, "invalid auth id", fmt.Errorf("parsing auth_id from URL: %w", err))
 	}
 
 	// We need to make sure we dont open for XSS style injections, if the parameter that
 	// is passed as a key is not parsable/validated as a NodePublic key, then fail to render
 	// the template and log an error.
-	registrationId, err := types.AuthIDFromString(raw)
+	authId, err := types.AuthIDFromString(raw)
 	if err != nil {
-		return "", NewHTTPError(http.StatusBadRequest, "invalid registration id", fmt.Errorf("parsing auth_id from URL: %w", err))
+		return "", NewHTTPError(http.StatusBadRequest, "invalid auth id", fmt.Errorf("parsing auth_id from URL: %w", err))
 	}
 
-	return registrationId, nil
+	return authId, nil
 }
 
 // RegisterHandler shows a simple message in the browser to point to the CLI
@@ -307,7 +363,7 @@ func (a *AuthProviderWeb) RegisterHandler(
 	writer http.ResponseWriter,
 	req *http.Request,
 ) {
-	registrationId, err := authIDFromRequest(req)
+	authId, err := authIDFromRequest(req)
 	if err != nil {
 		httpError(writer, err)
 		return
@@ -319,7 +375,7 @@ func (a *AuthProviderWeb) RegisterHandler(
 	_, err = writer.Write([]byte(templates.AuthWeb(
 		"Node registration",
 		"Run the command below in the headscale server to add this node to your network:",
-		fmt.Sprintf("headscale auth register --auth-id %s --user USERNAME", registrationId.String()),
+		fmt.Sprintf("headscale auth register --auth-id %s --user USERNAME", authId.String()),
 	).Render()))
 	if err != nil {
 		log.Error().Err(err).Msg("failed to write register response")

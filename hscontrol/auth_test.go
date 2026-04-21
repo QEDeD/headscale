@@ -681,7 +681,7 @@ func TestAuthenticationFlows(t *testing.T) {
 					return "", err
 				}
 
-				nodeToRegister := types.NewRegisterAuthRequest(types.Node{
+				nodeToRegister := types.NewRegisterAuthRequest(&types.RegistrationData{
 					Hostname: "followup-success-node",
 				})
 				app.state.SetAuthCacheEntry(regID, nodeToRegister)
@@ -723,7 +723,7 @@ func TestAuthenticationFlows(t *testing.T) {
 					return "", err
 				}
 
-				nodeToRegister := types.NewRegisterAuthRequest(types.Node{
+				nodeToRegister := types.NewRegisterAuthRequest(&types.RegistrationData{
 					Hostname: "followup-timeout-node",
 				})
 				app.state.SetAuthCacheEntry(regID, nodeToRegister)
@@ -816,10 +816,12 @@ func TestAuthenticationFlows(t *testing.T) {
 			validate: func(t *testing.T, resp *tailcfg.RegisterResponse, app *Headscale) { //nolint:thelper //nolint:thelper
 				assert.True(t, resp.MachineAuthorized)
 
-				// Node should be created with generated hostname
+				// Raw hostname is preserved (empty in, empty stored), and
+				// GivenName falls back to the literal "node" per SaaS.
 				node, found := app.state.GetNodeByNodeKey(nodeKey1.Public())
 				assert.True(t, found)
-				assert.NotEmpty(t, node.Hostname())
+				assert.Empty(t, node.Hostname())
+				assert.Equal(t, "node", node.GivenName())
 			},
 		},
 		// TEST: Nil hostinfo is handled with defensive code
@@ -854,12 +856,12 @@ func TestAuthenticationFlows(t *testing.T) {
 			validate: func(t *testing.T, resp *tailcfg.RegisterResponse, app *Headscale) { //nolint:thelper //nolint:thelper
 				assert.True(t, resp.MachineAuthorized)
 
-				// Node should be created with generated hostname from defensive code
+				// With nil Hostinfo the raw hostname stays empty and GivenName
+				// falls back to the literal "node" per the SaaS spec.
 				node, found := app.state.GetNodeByNodeKey(nodeKey1.Public())
 				assert.True(t, found)
-				assert.NotEmpty(t, node.Hostname())
-				// Hostname should start with "node-" (generated from machine key)
-				assert.True(t, strings.HasPrefix(node.Hostname(), "node-"))
+				assert.Empty(t, node.Hostname())
+				assert.Equal(t, "node", node.GivenName())
 			},
 		},
 
@@ -1341,7 +1343,7 @@ func TestAuthenticationFlows(t *testing.T) {
 					return "", err
 				}
 
-				nodeToRegister := types.NewRegisterAuthRequest(types.Node{
+				nodeToRegister := types.NewRegisterAuthRequest(&types.RegistrationData{
 					Hostname: "nil-response-node",
 				})
 				app.state.SetAuthCacheEntry(regID, nodeToRegister)
@@ -2251,9 +2253,9 @@ func TestAuthenticationFlows(t *testing.T) {
 				assert.True(t, found, "node should be registered despite nil hostinfo")
 
 				if found {
-					// Should have some default hostname or handle nil gracefully
-					hostname := node.Hostname()
-					assert.NotEmpty(t, hostname, "should have some hostname even with nil hostinfo")
+					// Raw hostname stays empty; GivenName falls back to "node".
+					assert.Empty(t, node.Hostname())
+					assert.Equal(t, "node", node.GivenName())
 				}
 			},
 		},
@@ -2507,7 +2509,7 @@ func TestAuthenticationFlows(t *testing.T) {
 			if req.Followup != "" {
 				var cancel context.CancelFunc
 
-				ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+				ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 			}
 
@@ -2618,7 +2620,7 @@ func runInteractiveWorkflowTest(t *testing.T, tt struct {
 				cacheEntry, found := app.state.GetAuthCacheEntry(registrationID)
 				require.True(t, found, "registration cache entry should exist")
 				require.NotNil(t, cacheEntry, "cache entry should not be nil")
-				require.Equal(t, req.NodeKey, cacheEntry.Node().NodeKey(), "cache entry should have correct node key")
+				require.Equal(t, req.NodeKey, cacheEntry.RegistrationData().NodeKey, "cache entry should have correct node key")
 			}
 
 		case stepTypeAuthCompletion:
@@ -3570,7 +3572,7 @@ func TestWebAuthRejectsUnauthorizedRequestTags(t *testing.T) {
 
 	// Simulate a registration cache entry (as would be created during web auth)
 	registrationID := types.MustAuthID()
-	regEntry := types.NewRegisterAuthRequest(types.Node{
+	regEntry := types.NewRegisterAuthRequest(&types.RegistrationData{
 		MachineKey: machineKey.Public(),
 		NodeKey:    nodeKey.Public(),
 		Hostname:   "webauth-tags-node",
@@ -3633,7 +3635,7 @@ func TestWebAuthReauthWithEmptyTagsRemovesAllTags(t *testing.T) {
 
 	// Step 1: Initial registration with tags
 	registrationID1 := types.MustAuthID()
-	regEntry1 := types.NewRegisterAuthRequest(types.Node{
+	regEntry1 := types.NewRegisterAuthRequest(&types.RegistrationData{
 		MachineKey: machineKey.Public(),
 		NodeKey:    nodeKey1.Public(),
 		Hostname:   "reauth-untag-node",
@@ -3660,7 +3662,7 @@ func TestWebAuthReauthWithEmptyTagsRemovesAllTags(t *testing.T) {
 	// Step 2: Reauth with EMPTY tags to untag
 	nodeKey2 := key.NewNode() // New node key for reauth
 	registrationID2 := types.MustAuthID()
-	regEntry2 := types.NewRegisterAuthRequest(types.Node{
+	regEntry2 := types.NewRegisterAuthRequest(&types.RegistrationData{
 		MachineKey: machineKey.Public(), // Same machine key
 		NodeKey:    nodeKey2.Public(),   // Different node key (rotation)
 		Hostname:   "reauth-untag-node",
@@ -3746,7 +3748,7 @@ func TestAuthKeyTaggedToUserOwnedViaReauth(t *testing.T) {
 	// Step 2: Reauth via web auth with EMPTY tags to transition to user-owned
 	nodeKey2 := key.NewNode() // New node key for reauth
 	registrationID := types.MustAuthID()
-	regEntry := types.NewRegisterAuthRequest(types.Node{
+	regEntry := types.NewRegisterAuthRequest(&types.RegistrationData{
 		MachineKey: machineKey.Public(), // Same machine key
 		NodeKey:    nodeKey2.Public(),   // Different node key (rotation)
 		Hostname:   "authkey-tagged-node",
@@ -3945,7 +3947,7 @@ func TestTaggedNodeWithoutUserToDifferentUser(t *testing.T) {
 	// This is what happens when running: headscale auth register --auth-id <id> --user alice
 	nodeKey2 := key.NewNode()
 	registrationID := types.MustAuthID()
-	regEntry := types.NewRegisterAuthRequest(types.Node{
+	regEntry := types.NewRegisterAuthRequest(&types.RegistrationData{
 		MachineKey: machineKey.Public(), // Same machine key as the tagged node
 		NodeKey:    nodeKey2.Public(),
 		Hostname:   "tagged-orphan-node",

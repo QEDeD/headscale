@@ -1,6 +1,7 @@
 package v2
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/netip"
 	"strings"
@@ -458,7 +459,7 @@ func TestUnmarshalPolicy(t *testing.T) {
 	],
 }
 `,
-			wantErr: `invalid autogroup: got "autogroup:invalid", must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self]`,
+			wantErr: `invalid autogroup: got "autogroup:invalid", must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self autogroup:danger-all]`,
 		},
 		{
 			name: "undefined-hostname-errors-2490",
@@ -589,7 +590,7 @@ func TestUnmarshalPolicy(t *testing.T) {
   ]
 }
 `,
-			wantErr: `tag not defined in policy: "tag:test"`,
+			wantErr: `tag not found: "tag:test"`,
 		},
 		{
 			name: "autogroup:internet-in-ssh-dst-not-allowed",
@@ -853,7 +854,7 @@ func TestUnmarshalPolicy(t *testing.T) {
   ]
 }
 `,
-			wantErr: `tag not defined in policy: "tag:notdefined"`,
+			wantErr: `tag not found: "tag:notdefined"`,
 		},
 		{
 			name: "tag-must-be-defined-acl-dst",
@@ -872,7 +873,7 @@ func TestUnmarshalPolicy(t *testing.T) {
   ]
 }
 `,
-			wantErr: `tag not defined in policy: "tag:notdefined"`,
+			wantErr: `tag not found: "tag:notdefined"`,
 		},
 		{
 			name: "tag-must-be-defined-acl-ssh-src",
@@ -891,7 +892,7 @@ func TestUnmarshalPolicy(t *testing.T) {
   ]
 }
 `,
-			wantErr: `tag not defined in policy: "tag:notdefined"`,
+			wantErr: `tag not found: "tag:notdefined"`,
 		},
 		{
 			name: "tag-must-be-defined-acl-ssh-dst",
@@ -913,7 +914,7 @@ func TestUnmarshalPolicy(t *testing.T) {
   ]
 }
 `,
-			wantErr: `tag not defined in policy: "tag:notdefined"`,
+			wantErr: `tag not found: "tag:notdefined"`,
 		},
 		{
 			name: "tag-must-be-defined-acl-autoapprover-route",
@@ -926,7 +927,7 @@ func TestUnmarshalPolicy(t *testing.T) {
   },
 }
 `,
-			wantErr: `tag not defined in policy: "tag:notdefined"`,
+			wantErr: `tag not found: "tag:notdefined"`,
 		},
 		{
 			name: "tag-must-be-defined-acl-autoapprover-exitnode",
@@ -937,7 +938,7 @@ func TestUnmarshalPolicy(t *testing.T) {
    },
 }
 `,
-			wantErr: `tag not defined in policy: "tag:notdefined"`,
+			wantErr: `tag not found: "tag:notdefined"`,
 		},
 		{
 			name: "missing-dst-port-is-err",
@@ -1795,6 +1796,33 @@ func TestUnmarshalPolicy(t *testing.T) {
 			},
 		},
 		{
+			name: "ssh-localpart-valid",
+			input: `
+{
+  "tagOwners": {"tag:prod": ["admin@"]},
+  "ssh": [{
+    "action": "accept",
+    "src": ["autogroup:member"],
+    "dst": ["tag:prod"],
+    "users": ["localpart:*@example.com"]
+  }]
+}
+`,
+			want: &Policy{
+				TagOwners: TagOwners{
+					Tag("tag:prod"): Owners{up("admin@")},
+				},
+				SSHs: []SSH{
+					{
+						Action:       "accept",
+						Sources:      SSHSrcAliases{agp("autogroup:member")},
+						Destinations: SSHDstAliases{tp("tag:prod")},
+						Users:        []SSHUser{SSHUser("localpart:*@example.com")},
+					},
+				},
+			},
+		},
+		{
 			name: "2754-bracketed-ipv6-multiple-ports",
 			input: `
 {
@@ -1821,6 +1849,33 @@ func TestUnmarshalPolicy(t *testing.T) {
 								},
 							},
 						},
+					},
+				},
+			},
+		},
+		{
+			name: "ssh-localpart-with-other-users",
+			input: `
+{
+  "tagOwners": {"tag:prod": ["admin@"]},
+  "ssh": [{
+    "action": "accept",
+    "src": ["autogroup:member"],
+    "dst": ["tag:prod"],
+    "users": ["localpart:*@example.com", "root", "autogroup:nonroot"]
+  }]
+}
+`,
+			want: &Policy{
+				TagOwners: TagOwners{
+					Tag("tag:prod"): Owners{up("admin@")},
+				},
+				SSHs: []SSH{
+					{
+						Action:       "accept",
+						Sources:      SSHSrcAliases{agp("autogroup:member")},
+						Destinations: SSHDstAliases{tp("tag:prod")},
+						Users:        []SSHUser{SSHUser("localpart:*@example.com"), "root", SSHUser(AutoGroupNonRoot)},
 					},
 				},
 			},
@@ -1950,6 +2005,51 @@ func TestUnmarshalPolicy(t *testing.T) {
 }
 `,
 			wantErr: "square brackets are only valid around IPv6 addresses",
+		},
+		{
+			name: "ssh-localpart-invalid-no-at-sign",
+			input: `
+{
+  "tagOwners": {"tag:prod": ["admin@"]},
+  "ssh": [{
+    "action": "accept",
+    "src": ["autogroup:member"],
+    "dst": ["tag:prod"],
+    "users": ["localpart:foo"]
+  }]
+}
+`,
+			wantErr: "invalid localpart format",
+		},
+		{
+			name: "ssh-localpart-invalid-non-wildcard",
+			input: `
+{
+  "tagOwners": {"tag:prod": ["admin@"]},
+  "ssh": [{
+    "action": "accept",
+    "src": ["autogroup:member"],
+    "dst": ["tag:prod"],
+    "users": ["localpart:alice@example.com"]
+  }]
+}
+`,
+			wantErr: "invalid localpart format",
+		},
+		{
+			name: "ssh-localpart-invalid-empty-domain",
+			input: `
+{
+  "tagOwners": {"tag:prod": ["admin@"]},
+  "ssh": [{
+    "action": "accept",
+    "src": ["autogroup:member"],
+    "dst": ["tag:prod"],
+    "users": ["localpart:*@"]
+  }]
+}
+`,
+			wantErr: "invalid localpart format",
 		},
 	}
 
@@ -2278,7 +2378,22 @@ func TestResolvePolicy(t *testing.T) {
 		{
 			name:      "wildcard-alias",
 			toResolve: Wildcard,
-			want:      []netip.Prefix{tsaddr.CGNATRange(), tsaddr.TailscaleULARange()},
+			want: []netip.Prefix{
+				mp("100.64.0.0/11"),
+				mp("100.96.0.0/12"),
+				mp("100.112.0.0/15"),
+				mp("100.114.0.0/16"),
+				mp("100.115.0.0/18"),
+				mp("100.115.64.0/20"),
+				mp("100.115.80.0/21"),
+				mp("100.115.88.0/22"),
+				mp("100.115.94.0/23"),
+				mp("100.115.96.0/19"),
+				mp("100.115.128.0/17"),
+				mp("100.116.0.0/14"),
+				mp("100.120.0.0/13"),
+				tsaddr.TailscaleULARange(),
+			},
 		},
 		{
 			name:      "autogroup-member-comprehensive",
@@ -2635,56 +2750,63 @@ func TestResolveAutoApprovers(t *testing.T) {
 
 func TestSSHUsers_NormalUsers(t *testing.T) {
 	tests := []struct {
-		name     string
-		users    SSHUsers
-		expected []SSHUser
+		name  string
+		users SSHUsers
+		want  []SSHUser
 	}{
 		{
-			name:     "empty users",
-			users:    SSHUsers{},
-			expected: []SSHUser{},
+			name:  "empty users",
+			users: SSHUsers{},
+			want:  nil,
 		},
 		{
-			name:     "only root",
-			users:    SSHUsers{"root"},
-			expected: []SSHUser{},
+			name:  "only root",
+			users: SSHUsers{"root"},
+			want:  nil,
 		},
 		{
-			name:     "only autogroup:nonroot",
-			users:    SSHUsers{SSHUser(AutoGroupNonRoot)},
-			expected: []SSHUser{},
+			name:  "only autogroup:nonroot",
+			users: SSHUsers{SSHUser(AutoGroupNonRoot)},
+			want:  nil,
 		},
 		{
-			name:     "only normal user",
-			users:    SSHUsers{"ssh-it-user"},
-			expected: []SSHUser{"ssh-it-user"},
+			name:  "only normal user",
+			users: SSHUsers{"ssh-it-user"},
+			want:  []SSHUser{"ssh-it-user"},
 		},
 		{
-			name:     "multiple normal users",
-			users:    SSHUsers{"ubuntu", "admin", "user1"},
-			expected: []SSHUser{"ubuntu", "admin", "user1"},
+			name:  "multiple normal users",
+			users: SSHUsers{"ubuntu", "admin", "user1"},
+			want:  []SSHUser{"ubuntu", "admin", "user1"},
 		},
 		{
-			name:     "mixed users with root",
-			users:    SSHUsers{"ubuntu", "root", "admin"},
-			expected: []SSHUser{"ubuntu", "admin"},
+			name:  "mixed users with root",
+			users: SSHUsers{"ubuntu", "root", "admin"},
+			want:  []SSHUser{"ubuntu", "admin"},
 		},
 		{
-			name:     "mixed users with autogroup:nonroot",
-			users:    SSHUsers{"ubuntu", SSHUser(AutoGroupNonRoot), "admin"},
-			expected: []SSHUser{"ubuntu", "admin"},
+			name:  "mixed users with autogroup:nonroot",
+			users: SSHUsers{"ubuntu", SSHUser(AutoGroupNonRoot), "admin"},
+			want:  []SSHUser{"ubuntu", "admin"},
 		},
 		{
-			name:     "mixed users with both root and autogroup:nonroot",
-			users:    SSHUsers{"ubuntu", "root", SSHUser(AutoGroupNonRoot), "admin"},
-			expected: []SSHUser{"ubuntu", "admin"},
+			name:  "mixed users with both root and autogroup:nonroot",
+			users: SSHUsers{"ubuntu", "root", SSHUser(AutoGroupNonRoot), "admin"},
+			want:  []SSHUser{"ubuntu", "admin"},
+		},
+		{
+			name:  "excludes localpart entries",
+			users: SSHUsers{"ubuntu", "root", SSHUser(AutoGroupNonRoot), SSHUser("localpart:*@example.com"), "admin"},
+			want:  []SSHUser{"ubuntu", "admin"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := tt.users.NormalUsers()
-			assert.ElementsMatch(t, tt.expected, result, "NormalUsers() should return expected normal users")
+			got := tt.users.NormalUsers()
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("NormalUsers() unexpected result (-want +got):\n%s", diff)
+			}
 		})
 	}
 }
@@ -2757,6 +2879,142 @@ func TestSSHUsers_ContainsNonRoot(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := tt.users.ContainsNonRoot()
 			assert.Equal(t, tt.expected, result, "ContainsNonRoot() should return expected result")
+		})
+	}
+}
+
+func TestSSHUsers_ContainsLocalpart(t *testing.T) {
+	tests := []struct {
+		name     string
+		users    SSHUsers
+		expected bool
+	}{
+		{
+			name:     "empty users",
+			users:    SSHUsers{},
+			expected: false,
+		},
+		{
+			name:     "contains localpart",
+			users:    SSHUsers{SSHUser("localpart:*@example.com")},
+			expected: true,
+		},
+		{
+			name:     "does not contain localpart",
+			users:    SSHUsers{"ubuntu", "admin", "root"},
+			expected: false,
+		},
+		{
+			name:     "contains localpart among others",
+			users:    SSHUsers{"ubuntu", SSHUser("localpart:*@example.com"), "admin"},
+			expected: true,
+		},
+		{
+			name:     "multiple localpart entries",
+			users:    SSHUsers{SSHUser("localpart:*@a.com"), SSHUser("localpart:*@b.com")},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.users.ContainsLocalpart()
+			assert.Equal(t, tt.expected, result, "ContainsLocalpart() should return expected result")
+		})
+	}
+}
+
+func TestSSHUsers_LocalpartEntries(t *testing.T) {
+	tests := []struct {
+		name  string
+		users SSHUsers
+		want  []SSHUser
+	}{
+		{
+			name:  "empty users",
+			users: SSHUsers{},
+			want:  nil,
+		},
+		{
+			name:  "no localpart entries",
+			users: SSHUsers{"root", "ubuntu", SSHUser(AutoGroupNonRoot)},
+			want:  nil,
+		},
+		{
+			name:  "single localpart entry",
+			users: SSHUsers{"root", SSHUser("localpart:*@example.com"), "ubuntu"},
+			want:  []SSHUser{SSHUser("localpart:*@example.com")},
+		},
+		{
+			name:  "multiple localpart entries",
+			users: SSHUsers{SSHUser("localpart:*@a.com"), "root", SSHUser("localpart:*@b.com")},
+			want:  []SSHUser{SSHUser("localpart:*@a.com"), SSHUser("localpart:*@b.com")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.users.LocalpartEntries()
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("LocalpartEntries() unexpected result (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestSSHUser_ParseLocalpart(t *testing.T) {
+	tests := []struct {
+		name           string
+		user           SSHUser
+		expectedDomain string
+		expectErr      bool
+	}{
+		{
+			name:           "valid localpart",
+			user:           SSHUser("localpart:*@example.com"),
+			expectedDomain: "example.com",
+		},
+		{
+			name:           "valid localpart with subdomain",
+			user:           SSHUser("localpart:*@corp.example.com"),
+			expectedDomain: "corp.example.com",
+		},
+		{
+			name:      "missing prefix",
+			user:      SSHUser("ubuntu"),
+			expectErr: true,
+		},
+		{
+			name:      "missing @ sign",
+			user:      SSHUser("localpart:foo"),
+			expectErr: true,
+		},
+		{
+			name:      "non-wildcard local part",
+			user:      SSHUser("localpart:alice@example.com"),
+			expectErr: true,
+		},
+		{
+			name:      "empty domain",
+			user:      SSHUser("localpart:*@"),
+			expectErr: true,
+		},
+		{
+			name:      "just prefix",
+			user:      SSHUser("localpart:"),
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			domain, err := tt.user.ParseLocalpart()
+			if tt.expectErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedDomain, domain)
+			}
 		})
 	}
 }
@@ -3670,7 +3928,7 @@ func TestACL_UnmarshalJSON_InvalidAction(t *testing.T) {
 
 	_, err := unmarshalPolicy([]byte(policyJSON))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `invalid ACL action: "deny"`)
+	assert.Contains(t, err.Error(), `action="deny" is not supported`)
 }
 
 // Helper function to parse aliases for testing.
@@ -4038,6 +4296,919 @@ func TestSSHCheckPeriodPolicyValidation(t *testing.T) {
 			}
 
 			require.NoError(t, err)
+		})
+	}
+}
+
+func TestUnmarshalGrants(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    *Policy
+		wantErr string
+	}{
+		{
+			name: "valid-grant-with-ip-field",
+			input: `
+{
+	"groups": {
+		"group:eng": ["alice@example.com"]
+	},
+	"tagOwners": {
+		"tag:server": ["group:eng"]
+	},
+	"grants": [
+		{
+			"src": ["group:eng"],
+			"dst": ["tag:server"],
+			"ip": ["tcp:443", "tcp:80"]
+		}
+	]
+}
+`,
+			want: &Policy{
+				Groups: Groups{
+					Group("group:eng"): []Username{Username("alice@example.com")},
+				},
+				TagOwners: TagOwners{
+					Tag("tag:server"): Owners{gp("group:eng")},
+				},
+				Grants: []Grant{
+					{
+						Sources: Aliases{
+							gp("group:eng"),
+						},
+						Destinations: Aliases{
+							tp("tag:server"),
+						},
+						InternetProtocols: []ProtocolPort{
+							{Protocol: "tcp", Ports: []tailcfg.PortRange{{First: 443, Last: 443}}},
+							{Protocol: "tcp", Ports: []tailcfg.PortRange{{First: 80, Last: 80}}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "valid-grant-with-app-field",
+			input: `
+{
+	"groups": {
+		"group:eng": ["alice@example.com"]
+	},
+	"tagOwners": {
+		"tag:relay": ["group:eng"]
+	},
+	"grants": [
+		{
+			"src": ["group:eng"],
+			"dst": ["tag:relay"],
+			"app": {
+				"tailscale.com/cap/relay": []
+			}
+		}
+	]
+}
+`,
+			want: &Policy{
+				Groups: Groups{
+					Group("group:eng"): []Username{Username("alice@example.com")},
+				},
+				TagOwners: TagOwners{
+					Tag("tag:relay"): Owners{gp("group:eng")},
+				},
+				Grants: []Grant{
+					{
+						Sources: Aliases{
+							gp("group:eng"),
+						},
+						Destinations: Aliases{
+							tp("tag:relay"),
+						},
+						App: tailcfg.PeerCapMap{
+							"tailscale.com/cap/relay": []tailcfg.RawMessage{},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "valid-grant-with-via-tags",
+			input: `
+{
+	"groups": {
+		"group:eng": ["alice@example.com"]
+	},
+	"tagOwners": {
+		"tag:server": ["group:eng"],
+		"tag:router": ["group:eng"]
+	},
+	"grants": [
+		{
+			"src": ["group:eng"],
+			"dst": ["autogroup:internet"],
+			"ip": ["*"],
+			"via": ["tag:router"]
+		}
+	]
+}
+`,
+			want: &Policy{
+				Groups: Groups{
+					Group("group:eng"): []Username{Username("alice@example.com")},
+				},
+				TagOwners: TagOwners{
+					Tag("tag:server"): Owners{gp("group:eng")},
+					Tag("tag:router"): Owners{gp("group:eng")},
+				},
+				Grants: []Grant{
+					{
+						Sources: Aliases{
+							gp("group:eng"),
+						},
+						Destinations: Aliases{
+							agp("autogroup:internet"),
+						},
+						InternetProtocols: []ProtocolPort{
+							{Protocol: "*", Ports: []tailcfg.PortRange{tailcfg.PortRangeAny}},
+						},
+						Via: []Tag{Tag("tag:router")},
+					},
+				},
+			},
+		},
+		{
+			name: "valid-grant-with-wildcard",
+			input: `
+{
+	"grants": [
+		{
+			"src": ["*"],
+			"dst": ["*"],
+			"ip": ["*"]
+		}
+	]
+}
+`,
+			want: &Policy{
+				Grants: []Grant{
+					{
+						Sources: Aliases{
+							Wildcard,
+						},
+						Destinations: Aliases{
+							Wildcard,
+						},
+						InternetProtocols: []ProtocolPort{
+							{Protocol: "*", Ports: []tailcfg.PortRange{tailcfg.PortRangeAny}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "valid-grant-with-multiple-sources-destinations",
+			input: `
+{
+	"groups": {
+		"group:eng": ["alice@example.com"],
+		"group:ops": ["bob@example.com"]
+	},
+	"tagOwners": {
+		"tag:web": ["group:eng"],
+		"tag:db": ["group:ops"]
+	},
+	"hosts": {
+		"server1": "100.64.0.1"
+	},
+	"grants": [
+		{
+			"src": ["group:eng", "alice@example.com", "100.64.0.10"],
+			"dst": ["tag:web", "tag:db", "server1"],
+			"ip": ["tcp:443", "udp:53"]
+		}
+	]
+}
+`,
+			want: &Policy{
+				Groups: Groups{
+					Group("group:eng"): []Username{Username("alice@example.com")},
+					Group("group:ops"): []Username{Username("bob@example.com")},
+				},
+				TagOwners: TagOwners{
+					Tag("tag:web"): Owners{gp("group:eng")},
+					Tag("tag:db"):  Owners{gp("group:ops")},
+				},
+				Hosts: Hosts{
+					"server1": Prefix(mp("100.64.0.1/32")),
+				},
+				Grants: []Grant{
+					{
+						Sources: Aliases{
+							gp("group:eng"),
+							up("alice@example.com"),
+							func() *Prefix { p := Prefix(mp("100.64.0.10/32")); return &p }(),
+						},
+						Destinations: Aliases{
+							tp("tag:web"),
+							tp("tag:db"),
+							hp("server1"),
+						},
+						InternetProtocols: []ProtocolPort{
+							{Protocol: "tcp", Ports: []tailcfg.PortRange{{First: 443, Last: 443}}},
+							{Protocol: "udp", Ports: []tailcfg.PortRange{{First: 53, Last: 53}}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "valid-grant-with-port-ranges",
+			input: `
+{
+	"grants": [
+		{
+			"src": ["*"],
+			"dst": ["*"],
+			"ip": ["tcp:8000-9000", "80", "443"]
+		}
+	]
+}
+`,
+			want: &Policy{
+				Grants: []Grant{
+					{
+						Sources: Aliases{
+							Wildcard,
+						},
+						Destinations: Aliases{
+							Wildcard,
+						},
+						InternetProtocols: []ProtocolPort{
+							{Protocol: "tcp", Ports: []tailcfg.PortRange{{First: 8000, Last: 9000}}},
+							{Protocol: "*", Ports: []tailcfg.PortRange{{First: 80, Last: 80}}},
+							{Protocol: "*", Ports: []tailcfg.PortRange{{First: 443, Last: 443}}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "valid-grant-with-autogroups",
+			input: `
+{
+	"grants": [
+		{
+			"src": ["autogroup:member"],
+			"dst": ["autogroup:self"],
+			"ip": ["*"]
+		}
+	]
+}
+`,
+			want: &Policy{
+				Grants: []Grant{
+					{
+						Sources: Aliases{
+							agp("autogroup:member"),
+						},
+						Destinations: Aliases{
+							agp("autogroup:self"),
+						},
+						InternetProtocols: []ProtocolPort{
+							{Protocol: "*", Ports: []tailcfg.PortRange{tailcfg.PortRangeAny}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "valid-grant-both-ip-and-app",
+			input: `
+{
+	"grants": [
+		{
+			"src": ["*"],
+			"dst": ["*"],
+			"ip": ["tcp:443"],
+			"app": {
+				"tailscale.com/cap/relay": []
+			}
+		}
+	]
+}
+`,
+			want: &Policy{
+				Grants: []Grant{
+					{
+						Sources: Aliases{
+							Wildcard,
+						},
+						Destinations: Aliases{
+							Wildcard,
+						},
+						InternetProtocols: []ProtocolPort{
+							{Protocol: "tcp", Ports: []tailcfg.PortRange{{First: 443, Last: 443}}},
+						},
+						App: tailcfg.PeerCapMap{
+							"tailscale.com/cap/relay": []tailcfg.RawMessage{},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "invalid-grant-missing-ip-and-app",
+			input: `
+{
+	"grants": [
+		{
+			"src": ["*"],
+			"dst": ["*"]
+		}
+	]
+}
+`,
+			wantErr: "ip and app can not both be empty",
+		},
+		{
+			name: "valid-grant-empty-sources",
+			input: `
+{
+	"grants": [
+		{
+			"src": [],
+			"dst": ["*"],
+			"ip": ["*"]
+		}
+	]
+}
+`,
+			want: &Policy{
+				Grants: []Grant{
+					{
+						Sources:      Aliases{},
+						Destinations: Aliases{Wildcard},
+						InternetProtocols: []ProtocolPort{
+							{Protocol: "*", Ports: []tailcfg.PortRange{tailcfg.PortRangeAny}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "valid-grant-empty-destinations",
+			input: `
+{
+	"grants": [
+		{
+			"src": ["*"],
+			"dst": [],
+			"ip": ["*"]
+		}
+	]
+}
+`,
+			want: &Policy{
+				Grants: []Grant{
+					{
+						Sources:      Aliases{Wildcard},
+						Destinations: Aliases{},
+						InternetProtocols: []ProtocolPort{
+							{Protocol: "*", Ports: []tailcfg.PortRange{tailcfg.PortRangeAny}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "invalid-grant-undefined-via-tag",
+			input: `
+{
+	"tagOwners": {
+		"tag:server": ["alice@example.com"]
+	},
+	"grants": [
+		{
+			"src": ["*"],
+			"dst": ["autogroup:internet"],
+			"ip": ["*"],
+			"via": ["tag:undefined-router"]
+		}
+	]
+}
+`,
+			wantErr: `tag "tag:undefined-router" not found`,
+		},
+		{
+			name: "invalid-grant-undefined-source-group",
+			input: `
+{
+	"grants": [
+		{
+			"src": ["group:undefined"],
+			"dst": ["*"],
+			"ip": ["*"]
+		}
+	]
+}
+`,
+			wantErr: "group not defined in policy",
+		},
+		{
+			name: "invalid-grant-undefined-source-tag",
+			input: `
+{
+	"grants": [
+		{
+			"src": ["tag:undefined"],
+			"dst": ["*"],
+			"ip": ["*"]
+		}
+	]
+}
+`,
+			wantErr: "tag not found",
+		},
+		{
+			name: "invalid-grant-undefined-destination-host",
+			input: `
+{
+	"grants": [
+		{
+			"src": ["*"],
+			"dst": ["host-undefined"],
+			"ip": ["*"]
+		}
+	]
+}
+`,
+			wantErr: "host not defined",
+		},
+		{
+			name: "invalid-grant-autogroup-self-with-tag-source",
+			input: `
+{
+	"tagOwners": {
+		"tag:server": ["alice@example.com"]
+	},
+	"grants": [
+		{
+			"src": ["tag:server"],
+			"dst": ["autogroup:self"],
+			"ip": ["*"]
+		}
+	]
+}
+`,
+			wantErr: "autogroup:self can only be used with users, groups, or supported autogroups",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy, err := unmarshalPolicy([]byte(tt.input))
+			if tt.wantErr != "" {
+				// Unmarshal succeeded, try validate
+				if err == nil {
+					err = policy.validate()
+				}
+
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			// Validate the policy
+			err = policy.validate()
+			if err != nil {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+
+			if diff := cmp.Diff(tt.want, policy, cmpopts.IgnoreUnexported(Policy{}, Prefix{})); diff != "" {
+				t.Errorf("Policy unmarshal mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestACLToGrants(t *testing.T) {
+	tests := []struct {
+		name string
+		acl  ACL
+		want []Grant
+	}{
+		{
+			name: "single-destination-tcp",
+			acl: ACL{
+				Action:   ActionAccept,
+				Protocol: ProtocolNameTCP,
+				Sources:  Aliases{gp("group:eng")},
+				Destinations: []AliasWithPorts{
+					{
+						Alias: tp("tag:server"),
+						Ports: []tailcfg.PortRange{{First: 443, Last: 443}},
+					},
+				},
+			},
+			want: []Grant{
+				{
+					Sources:      Aliases{gp("group:eng")},
+					Destinations: Aliases{tp("tag:server")},
+					InternetProtocols: []ProtocolPort{
+						{
+							Protocol: ProtocolNameTCP,
+							Ports:    []tailcfg.PortRange{{First: 443, Last: 443}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "multiple-destinations-creates-multiple-grants",
+			acl: ACL{
+				Action:   ActionAccept,
+				Protocol: ProtocolNameTCP,
+				Sources:  Aliases{gp("group:eng")},
+				Destinations: []AliasWithPorts{
+					{
+						Alias: tp("tag:web"),
+						Ports: []tailcfg.PortRange{{First: 80, Last: 80}},
+					},
+					{
+						Alias: tp("tag:db"),
+						Ports: []tailcfg.PortRange{{First: 5432, Last: 5432}},
+					},
+				},
+			},
+			want: []Grant{
+				{
+					Sources:      Aliases{gp("group:eng")},
+					Destinations: Aliases{tp("tag:web")},
+					InternetProtocols: []ProtocolPort{
+						{
+							Protocol: ProtocolNameTCP,
+							Ports:    []tailcfg.PortRange{{First: 80, Last: 80}},
+						},
+					},
+				},
+				{
+					Sources:      Aliases{gp("group:eng")},
+					Destinations: Aliases{tp("tag:db")},
+					InternetProtocols: []ProtocolPort{
+						{
+							Protocol: ProtocolNameTCP,
+							Ports:    []tailcfg.PortRange{{First: 5432, Last: 5432}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "wildcard-protocol",
+			acl: ACL{
+				Action:   ActionAccept,
+				Protocol: ProtocolNameWildcard,
+				Sources:  Aliases{gp("group:admin")},
+				Destinations: []AliasWithPorts{
+					{
+						Alias: up("alice@example.com"),
+						Ports: []tailcfg.PortRange{tailcfg.PortRangeAny},
+					},
+				},
+			},
+			want: []Grant{
+				{
+					Sources:      Aliases{gp("group:admin")},
+					Destinations: Aliases{up("alice@example.com")},
+					InternetProtocols: []ProtocolPort{
+						{
+							Protocol: ProtocolNameWildcard,
+							Ports:    []tailcfg.PortRange{tailcfg.PortRangeAny},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "udp-with-port-range",
+			acl: ACL{
+				Action:   ActionAccept,
+				Protocol: ProtocolNameUDP,
+				Sources:  Aliases{up("bob@example.com")},
+				Destinations: []AliasWithPorts{
+					{
+						Alias: tp("tag:voip"),
+						Ports: []tailcfg.PortRange{{First: 10000, Last: 20000}},
+					},
+				},
+			},
+			want: []Grant{
+				{
+					Sources:      Aliases{up("bob@example.com")},
+					Destinations: Aliases{tp("tag:voip")},
+					InternetProtocols: []ProtocolPort{
+						{
+							Protocol: ProtocolNameUDP,
+							Ports:    []tailcfg.PortRange{{First: 10000, Last: 20000}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "icmp-protocol",
+			acl: ACL{
+				Action:   ActionAccept,
+				Protocol: ProtocolNameICMP,
+				Sources:  Aliases{gp("group:monitoring")},
+				Destinations: []AliasWithPorts{
+					{
+						Alias: new(Asterix),
+						Ports: []tailcfg.PortRange{tailcfg.PortRangeAny},
+					},
+				},
+			},
+			want: []Grant{
+				{
+					Sources:      Aliases{gp("group:monitoring")},
+					Destinations: Aliases{new(Asterix)},
+					InternetProtocols: []ProtocolPort{
+						{
+							Protocol: ProtocolNameICMP,
+							Ports:    []tailcfg.PortRange{tailcfg.PortRangeAny},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := aclToGrants(tt.acl)
+
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("aclToGrants() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestGrantMarshalJSON(t *testing.T) {
+	tests := []struct {
+		name     string
+		grant    Grant
+		wantJSON string
+	}{
+		{
+			name: "ip-based-grant-tcp-single-port",
+			grant: Grant{
+				Sources:      Aliases{gp("group:eng")},
+				Destinations: Aliases{tp("tag:server")},
+				InternetProtocols: []ProtocolPort{
+					{
+						Protocol: ProtocolNameTCP,
+						Ports:    []tailcfg.PortRange{{First: 443, Last: 443}},
+					},
+				},
+			},
+			wantJSON: `{
+				"src": ["group:eng"],
+				"dst": ["tag:server"],
+				"ip": ["tcp:443"]
+			}`,
+		},
+		{
+			name: "ip-based-grant-udp-port-range",
+			grant: Grant{
+				Sources:      Aliases{up("alice@example.com")},
+				Destinations: Aliases{tp("tag:voip")},
+				InternetProtocols: []ProtocolPort{
+					{
+						Protocol: ProtocolNameUDP,
+						Ports:    []tailcfg.PortRange{{First: 10000, Last: 20000}},
+					},
+				},
+			},
+			wantJSON: `{
+				"src": ["alice@example.com"],
+				"dst": ["tag:voip"],
+				"ip": ["udp:10000-20000"]
+			}`,
+		},
+		{
+			name: "ip-based-grant-wildcard-protocol",
+			grant: Grant{
+				Sources:      Aliases{gp("group:admin")},
+				Destinations: Aliases{Asterix(0)},
+				InternetProtocols: []ProtocolPort{
+					{
+						Protocol: ProtocolNameWildcard,
+						Ports:    []tailcfg.PortRange{tailcfg.PortRangeAny},
+					},
+				},
+			},
+			wantJSON: `{
+				"src": ["group:admin"],
+				"dst": ["*"],
+				"ip": ["*"]
+			}`,
+		},
+		{
+			name: "ip-based-grant-icmp",
+			grant: Grant{
+				Sources:      Aliases{gp("group:monitoring")},
+				Destinations: Aliases{tp("tag:servers")},
+				InternetProtocols: []ProtocolPort{
+					{
+						Protocol: ProtocolNameICMP,
+						Ports:    []tailcfg.PortRange{tailcfg.PortRangeAny},
+					},
+				},
+			},
+			wantJSON: `{
+				"src": ["group:monitoring"],
+				"dst": ["tag:servers"],
+				"ip": ["icmp:0-65535"]
+			}`,
+		},
+		{
+			name: "ip-based-grant-multiple-protocols",
+			grant: Grant{
+				Sources:      Aliases{gp("group:web")},
+				Destinations: Aliases{tp("tag:lb")},
+				InternetProtocols: []ProtocolPort{
+					{
+						Protocol: ProtocolNameTCP,
+						Ports:    []tailcfg.PortRange{{First: 80, Last: 80}},
+					},
+					{
+						Protocol: ProtocolNameTCP,
+						Ports:    []tailcfg.PortRange{{First: 443, Last: 443}},
+					},
+				},
+			},
+			wantJSON: `{
+				"src": ["group:web"],
+				"dst": ["tag:lb"],
+				"ip": ["tcp:80", "tcp:443"]
+			}`,
+		},
+		{
+			name: "capability-based-grant",
+			grant: Grant{
+				Sources:      Aliases{gp("group:admins")},
+				Destinations: Aliases{tp("tag:database")},
+				App: tailcfg.PeerCapMap{
+					"backup": []tailcfg.RawMessage{
+						tailcfg.RawMessage(`{"action":"read"}`),
+						tailcfg.RawMessage(`{"action":"write"}`),
+					},
+				},
+			},
+			wantJSON: `{
+				"src": ["group:admins"],
+				"dst": ["tag:database"],
+				"app": {
+					"backup": [
+						{"action":"read"},
+						{"action":"write"}
+					]
+				}
+			}`,
+		},
+		{
+			name: "grant-with-both-ip-and-app",
+			grant: Grant{
+				Sources:      Aliases{up("bob@example.com")},
+				Destinations: Aliases{tp("tag:app-server")},
+				InternetProtocols: []ProtocolPort{
+					{
+						Protocol: ProtocolNameTCP,
+						Ports:    []tailcfg.PortRange{{First: 8080, Last: 8080}},
+					},
+				},
+				App: tailcfg.PeerCapMap{
+					"admin": []tailcfg.RawMessage{
+						tailcfg.RawMessage(`{"level":"superuser"}`),
+					},
+				},
+			},
+			wantJSON: `{
+				"src": ["bob@example.com"],
+				"dst": ["tag:app-server"],
+				"ip": ["tcp:8080"],
+				"app": {
+					"admin": [{"level":"superuser"}]
+				}
+			}`,
+		},
+		{
+			name: "grant-with-via",
+			grant: Grant{
+				Sources:      Aliases{gp("group:remote-workers")},
+				Destinations: Aliases{tp("tag:internal")},
+				InternetProtocols: []ProtocolPort{
+					{
+						Protocol: ProtocolNameTCP,
+						Ports:    []tailcfg.PortRange{tailcfg.PortRangeAny},
+					},
+				},
+				Via: []Tag{
+					*tp("tag:gateway1"),
+					*tp("tag:gateway2"),
+				},
+			},
+			wantJSON: `{
+				"src": ["group:remote-workers"],
+				"dst": ["tag:internal"],
+				"ip": ["tcp:0-65535"],
+				"via": ["tag:gateway1", "tag:gateway2"]
+			}`,
+		},
+		{
+			name: "grant-omitzero-app-field",
+			grant: Grant{
+				Sources:      Aliases{gp("group:users")},
+				Destinations: Aliases{tp("tag:web")},
+				InternetProtocols: []ProtocolPort{
+					{
+						Protocol: ProtocolNameTCP,
+						Ports:    []tailcfg.PortRange{{First: 80, Last: 80}},
+					},
+				},
+				App: nil,
+			},
+			wantJSON: `{
+				"src": ["group:users"],
+				"dst": ["tag:web"],
+				"ip": ["tcp:80"]
+			}`,
+		},
+		{
+			name: "grant-omitzero-via-field",
+			grant: Grant{
+				Sources:      Aliases{gp("group:users")},
+				Destinations: Aliases{tp("tag:api")},
+				InternetProtocols: []ProtocolPort{
+					{
+						Protocol: ProtocolNameTCP,
+						Ports:    []tailcfg.PortRange{{First: 443, Last: 443}},
+					},
+				},
+				Via: nil,
+			},
+			wantJSON: `{
+				"src": ["group:users"],
+				"dst": ["tag:api"],
+				"ip": ["tcp:443"]
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Marshal the Grant to JSON
+			gotJSON, err := json.Marshal(tt.grant)
+			if err != nil {
+				t.Fatalf("failed to marshal Grant: %v", err)
+			}
+
+			// Compact the expected JSON to remove whitespace for comparison
+			var wantCompact bytes.Buffer
+
+			err = json.Compact(&wantCompact, []byte(tt.wantJSON))
+			if err != nil {
+				t.Fatalf("failed to compact expected JSON: %v", err)
+			}
+
+			// Compare JSON strings
+			if string(gotJSON) != wantCompact.String() {
+				t.Errorf("Grant.MarshalJSON() mismatch:\ngot:  %s\nwant: %s", string(gotJSON), wantCompact.String())
+			}
+
+			// Test round-trip: unmarshal and compare with original
+			var unmarshaled Grant
+
+			err = json.Unmarshal(gotJSON, &unmarshaled)
+			if err != nil {
+				t.Fatalf("failed to unmarshal JSON: %v", err)
+			}
+
+			if diff := cmp.Diff(tt.grant, unmarshaled); diff != "" {
+				t.Errorf("Grant round-trip mismatch (-original +unmarshaled):\n%s", diff)
+			}
 		})
 	}
 }
